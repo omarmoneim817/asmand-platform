@@ -2201,20 +2201,20 @@ STRUCTURE THE EMAIL AS FOLLOWS:
 
 1. ONE sentence intro: who we are and why we are writing
 2. Formal RFQ section — use a clear numbered or bulleted list for EACH item we need quoted, with:
-   • Product name + any model/spec reference
-   • Quantity requested
-   • Required technical standard (NIJ, MIL-SPEC, STANAG, ISO etc)
-   • Requested delivery to Cairo, Egypt
+   - Product name + any model/spec reference
+   - Quantity requested
+   - Required technical standard (NIJ, MIL-SPEC, STANAG, ISO etc)
+   - Requested delivery to Cairo, Egypt
 3. Ask for the following in their quotation response:
-   • Unit price in USD or EUR (EXW, FOB, and CIF Cairo)
-   • Minimum Order Quantity (MOQ)
-   • Lead time from order confirmation
-   • Payment terms offered
-   • Validity period of the quote
+   - Unit price in USD or EUR (EXW, FOB, and CIF Cairo)
+   - Minimum Order Quantity (MOQ)
+   - Lead time from order confirmation
+   - Payment terms offered
+   - Validity period of the quote
 4. Compliance section — ask specifically:
-   • Export licence status for Egypt (ITAR, EAR, EU Dual-Use)
-   • Any existing Egyptian MOD or Armed Forces approvals/qualifications
-   • End-user certificate requirements
+   - Export licence status for Egypt (ITAR, EAR, EU Dual-Use)
+   - Any existing Egyptian MOD or Armed Forces approvals/qualifications
+   - End-user certificate requirements
 5. Close with our response deadline and contact details
 
 Tone: Formal procurement document. Precise, no fluff. Every sentence must serve a purpose.
@@ -3196,16 +3196,8 @@ Return ONLY valid JSON.`;
                   onChange={e=>setEmailModal(p=>({...p,customPrompt:e.target.value}))}
                   rows={4}
                   placeholder={emailModal.type==="rfq"
-                    ? "Tell AI anything specific:
-• We need DDP pricing to Cairo
-• Ask if they have existing MOD approvals
-• Mention tender deadline is in 3 weeks
-• Ask for lead time and payment terms"
-                    : "Tell AI anything specific:
-• Mention our Air Force connections
-• We attended EDEX 2023
-• Focus on their night vision product line
-• Request a product demo in Cairo"}
+                    ? "Tell AI anything specific:\n- We need DDP pricing to Cairo\n- Ask if they have existing MOD approvals\n- Mention tender deadline is in 3 weeks\n- Ask for lead time and payment terms"
+                    : "Tell AI anything specific:\n- Mention our Air Force connections\n- We attended EDEX 2023\n- Focus on their night vision product line\n- Request a product demo in Cairo"}
                   style={{fontFamily:"Inter,sans-serif",fontSize:12,lineHeight:1.6}}
                 />
               </div>
