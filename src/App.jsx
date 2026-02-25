@@ -85,6 +85,20 @@ async function ai(prompt, maxTokens=3500) {
   return repairJSON(raw);
 }
 
+// ── CATEGORIES ──
+const CATEGORIES_KEY = "ashmand:categories";
+const DEFAULT_CATS = [
+  "Weapons & Ammunition","Electronics & Communications","PPE",
+  "Vehicles & Logistics","Surveillance","C2 Systems","MRO","Training","Other"
+];
+const getCategories = () => {
+  try {
+    const raw = localStorage.getItem(CATEGORIES_KEY);
+    const parsed = raw ? JSON.parse(raw) : null;
+    return (parsed && parsed.length > 0) ? parsed : DEFAULT_CATS;
+  } catch { return DEFAULT_CATS; }
+};
+
 // ── TAG INPUT COMPONENT ──
 function TagInput({ value, onChange, placeholder }) {
   const [input, setInput] = useState("");
@@ -284,7 +298,7 @@ function buildPrompt1(tenderDoc, userSuppliers, userCompetitors) {
   +suppSection+"\n"+compNames+"\n\n"
   +"TENDER (first 1800 chars):\n"+tenderDoc.slice(0,1800)+"\n\n"
   +"Return ONLY this JSON structure — ALL string values max 10 words:\n"
-  +'{"tender":{"refNum":"","title":"","authority":"","branch":"Army|Navy|Air Force|Air Defence|MOD|NSPO|AOI|Police","category":"PPE|Weapons & Ammunition|Electronics & Communications|Vehicles & Logistics|Surveillance|C2 Systems|MRO|Training|Other","estimatedValue":"","deadline":"YYYY-MM-DD","dateReceived":"'+TODAY+'","quantity":"","keySpecs":["s1","s2","s3"],"requiredCertifications":["c1"],"summary":"max 20 words total"},'
+  +'{"tender":{"refNum":"","title":"","authority":"","branch":"Army|Navy|Air Force|Air Defence|MOD|NSPO|AOI|Police","category":"PPE|Weapons & Ammunition|Electronics & Communications|Vehicles & Logistics|Surveillance|C2 Systems|MRO|Training|Other","estimatedValue":"numeric only or empty string","bidBond":"numeric amount if stated else empty","bidBondPct":"percentage if stated else 2","bidBondDerivedValue":"if bidBond stated: calculate bidBond/bidBondPct*100 as numeric, else empty","deadline":"YYYY-MM-DD","dateReceived":"'+TODAY+'","quantity":"","keySpecs":["s1","s2","s3"],"requiredCertifications":["c1"],"summary":"max 20 words total"},'
   +'"opportunityScore":75,"verdict":"GO","verdictReason":"max 10 words","yourStrengths":["s1","s2","s3"],"yourWeaknesses":["w1","w2"],"criticalSuccessFactors":["f1","f2","f3"],'
   +'"suppliers":{'
   +'"existing":[{"name":"","country":"","suitabilityScore":80,"fitAssessment":"max 10 words","exportRisk":"low|medium|high","egyptRelationship":"established|good|developing|unknown","pricePosition":"budget|competitive|premium","leadTime":"","negotiationTip":"max 10 words","email":"","website":""}],'
@@ -559,6 +573,35 @@ function TenderIntelligence({ suppliers, onSaveSuppliers }) {
       // MERGE
       const merged = { ...part1, ...part2 };
 
+      // ── BID BOND → DERIVE TENDER VALUE ──
+      // If AI found a bid bond figure but no direct value, calculate: value = bidBond / bidBondPct * 100
+      if(merged.tender) {
+        const t = merged.tender;
+        const bidBondAmt  = parseFloat(String(t.bidBond||"").replace(/[^0-9.]/g,"")) || 0;
+        const bidBondPct  = parseFloat(String(t.bidBondPct||"2").replace(/[^0-9.]/g,"")) || 2;
+        const directValue = parseFloat(String(t.estimatedValue||"").replace(/[^0-9.]/g,"")) || 0;
+
+        if(!directValue && bidBondAmt > 0) {
+          // Derive: e.g. bid bond EGP 100,000 at 2% → tender worth EGP 5,000,000
+          const derived = Math.round((bidBondAmt / bidBondPct) * 100);
+          merged.tender.estimatedValue   = String(derived);
+          merged.tender.bidBondDerivedValue = String(derived);
+          merged.tender._valueSource = "bid_bond"; // track how we got this
+        } else if(directValue && bidBondAmt > 0) {
+          // Both exist — verify they're consistent, flag if wildly off
+          const impliedValue = Math.round((bidBondAmt / bidBondPct) * 100);
+          const variance = Math.abs(impliedValue - directValue) / directValue;
+          merged.tender.bidBondDerivedValue = String(impliedValue);
+          merged.tender._valueSource = "direct";
+          if(variance > 0.3) {
+            // More than 30% discrepancy — trust the bid bond calculation more
+            merged.tender._valueNote = `Direct value (${directValue.toLocaleString()}) vs bid bond implied (${impliedValue.toLocaleString()}) — verify`;
+          }
+        } else if(directValue) {
+          merged.tender._valueSource = "direct";
+        }
+      }
+
       // Ensure competitors list never contains any supplier names
       const supplierNames = new Set([
         ...(merged.suppliers?.recommended||[]).map(s=>s.name?.toLowerCase()),
@@ -640,7 +683,11 @@ function TenderIntelligence({ suppliers, onSaveSuppliers }) {
             refNum: autoRef,
             title: t.title, authority: t.authority,
             category: t.category, dateReceived: t.dateReceived||new Date().toISOString().slice(0,10),
-            deadline: t.deadline, value: t.estimatedValue,
+            deadline: t.deadline,
+            value: t.estimatedValue,
+            bidBond: t.bidBond||"",
+            bidBondPct: t.bidBondPct||"2",
+            valueSource: t._valueSource||"",
             status: "Pending", notes: t.summary,
             rawDoc: tenderDoc,
             aiAnalysis: JSON.stringify(merged),
@@ -692,7 +739,11 @@ function TenderIntelligence({ suppliers, onSaveSuppliers }) {
       refNum: t.refNum||"AUTO-"+Date.now(),
       title: t.title, authority: t.authority,
       category: t.category, dateReceived: t.dateReceived||new Date().toISOString().slice(0,10),
-      deadline: t.deadline, value: t.estimatedValue,
+      deadline: t.deadline,
+      value: t.estimatedValue,
+      bidBond: t.bidBond||"",
+      bidBondPct: t.bidBondPct||"2",
+      valueSource: t._valueSource||"",
       status: "Pending", notes: t.summary,
       rawDoc: tenderDoc,
       aiAnalysis: JSON.stringify(result),
@@ -968,7 +1019,46 @@ Return ONLY a JSON array of 6 suppliers:
             <Badge label={r?.tender?.refNum||"No ref"} color={C.accent}/>
             <Badge label={r?.tender?.category||"—"} color={C.t2}/>
             {r?.tender?.deadline&&<Badge label={"Deadline: "+r.tender.deadline} color={C.gold}/>}
-            {r?.tender?.estimatedValue&&<Badge label={"EGP "+Number(r.tender.estimatedValue).toLocaleString()} color={C.blue}/>}
+            {r?.tender?.estimatedValue&&(
+              <div style={{display:"flex",alignItems:"center",gap:6,padding:"4px 10px",
+                background:"rgba(74,158,255,0.1)",border:"1px solid rgba(74,158,255,0.3)",borderRadius:12}}>
+                <span style={{fontFamily:"JetBrains Mono,monospace",fontSize:11,fontWeight:800,color:C.blue}}>
+                  EGP {Number(r.tender.estimatedValue).toLocaleString()}
+                </span>
+                {r.tender._valueSource==="bid_bond"&&(
+                  <span style={{fontFamily:"JetBrains Mono,monospace",fontSize:9,color:C.t2,
+                    background:C.s2,padding:"1px 6px",borderRadius:8}}>
+                    via bid bond {r.tender.bidBondPct||2}%
+                  </span>
+                )}
+                {r.tender._valueSource==="direct"&&r.tender.bidBondDerivedValue&&
+                  r.tender.bidBondDerivedValue!==r.tender.estimatedValue&&(
+                  <span style={{fontFamily:"JetBrains Mono,monospace",fontSize:9,color:C.t2,
+                    background:C.s2,padding:"1px 6px",borderRadius:8}}>
+                    bond implies {Number(r.tender.bidBondDerivedValue).toLocaleString()}
+                  </span>
+                )}
+              </div>
+            )}
+            {/* Show bid bond row if found */}
+            {r?.tender?.bidBond&&(
+              <div style={{display:"flex",alignItems:"center",gap:5,padding:"4px 10px",
+                background:"rgba(232,160,32,0.08)",border:"1px solid rgba(232,160,32,0.25)",borderRadius:12}}>
+                <span style={{fontFamily:"JetBrains Mono,monospace",fontSize:9,color:C.gold}}>BID BOND</span>
+                <span style={{fontFamily:"JetBrains Mono,monospace",fontSize:11,fontWeight:700,color:C.tb}}>
+                  EGP {Number(r.tender.bidBond).toLocaleString()}
+                </span>
+                <span style={{fontFamily:"JetBrains Mono,monospace",fontSize:9,color:C.t2}}>
+                  @ {r.tender.bidBondPct||2}%
+                </span>
+              </div>
+            )}
+            {r?.tender?._valueNote&&(
+              <div style={{padding:"3px 10px",background:"rgba(230,57,70,0.08)",border:"1px solid rgba(230,57,70,0.25)",
+                borderRadius:12,fontFamily:"JetBrains Mono,monospace",fontSize:9,color:C.red}}>
+                ⚠ {r.tender._valueNote}
+              </div>
+            )}
           </div>
         </div>
         <div style={{textAlign:"center",flexShrink:0}}>
@@ -1470,7 +1560,7 @@ Return ONLY a JSON array of 6 suppliers:
 // ═══════════════════════════════════════════════════
 // MODULE: ASHMAND TENDERS FILE
 // ═══════════════════════════════════════════════════
-function TendersFile({ tenders:tendersProp, setTenders:setTendersProp, contacts }) {
+function TendersFile({ tenders:tendersProp, setTenders:setTendersProp, contacts, categories }) {
   const [tendersLocal,setTendersLocal] = useState([]);
   const tenders    = tendersProp    || tendersLocal;
   const setTenders = setTendersProp || ((d)=>{ setTendersLocal(d); stor.set("asmand:tenders",d); });
@@ -1515,7 +1605,7 @@ function TendersFile({ tenders:tendersProp, setTenders:setTendersProp, contacts 
     setExtracting(false);
   };
 
-  const CATS   = ["Weapons & Ammunition","Electronics & Communications","PPE","Vehicles & Logistics","Surveillance","C2 Systems","MRO","Training","Other"];
+  const CATS   = categories || getCategories();
   const STATS  = ["Pending","Submitted","Won","Lost","Cancelled"];
   const BRANCH = ["Egyptian Army","Egyptian Navy","Egyptian Air Force","Egyptian Air Defence","MOD Central","NSPO","AOI","Police","Other"];
 
@@ -1598,7 +1688,21 @@ function TendersFile({ tenders:tendersProp, setTenders:setTendersProp, contacts 
                   <div style={{fontSize:12,color:C.t2,fontFamily:"Inter,sans-serif",marginTop:2}}>
                     {t.authority&&<span>{t.authority}</span>}
                     {t.deadline&&<span style={{marginLeft:12}}>📅 {t.deadline}</span>}
-                    {t.value&&<span style={{marginLeft:12}}>💰 EGP {Number(t.value).toLocaleString()}</span>}
+                    {t.value&&(
+                      <span style={{marginLeft:12}}>
+                        💰 EGP {Number(t.value).toLocaleString()}
+                        {t.valueSource==="bid_bond"&&(
+                          <span style={{marginLeft:5,fontSize:10,color:C.t3,fontFamily:"JetBrains Mono,monospace"}}>
+                            (via {t.bidBondPct||2}% bond)
+                          </span>
+                        )}
+                      </span>
+                    )}
+                    {t.bidBond&&!t.value&&(
+                      <span style={{marginLeft:12,color:C.gold}}>
+                        🔒 Bond: EGP {Number(t.bidBond).toLocaleString()} → ~EGP {Math.round(Number(t.bidBond)/(Number(t.bidBondPct)||2)*100).toLocaleString()}
+                      </span>
+                    )}
                     {t.dateReceived&&<span style={{marginLeft:12,color:C.t3}}>Received: {t.dateReceived}</span>}
                   </div>
                 </div>
@@ -1946,7 +2050,7 @@ function ExcelImporter({ mode, onImport, onClose }) {
   );
 }
 
-function SupplierDirectory({ suppliers, setSuppliers, contacts, setContacts }) {
+function SupplierDirectory({ suppliers, setSuppliers, contacts, setContacts, settings, categories }) {
   const [showForm,setShowForm]     = useState(false);
   const [showExcel,setShowExcel]   = useState(false);
   const [editId,setEditId]         = useState(null);
@@ -1956,6 +2060,7 @@ function SupplierDirectory({ suppliers, setSuppliers, contacts, setContacts }) {
   const [importMsg,setImportMsg]   = useState("");
   const [syncMsg,setSyncMsg]       = useState("");
   const [showDupes,setShowDupes]   = useState(false);
+  const [emailModal,setEmailModal] = useState(null); // {supplier, type, email, subject, body, loading}
   const [form,setForm]             = useState({name:"",country:"",category:"",exportRisk:"",pricePosition:"",egyptRelationship:"",certifications:[],keyProducts:[],email:"",website:"",linkedIn:"",phone:"",contactPerson:"",notes:"",rating:""});
 
   // ── DUPLICATE DETECTION ──
@@ -2021,6 +2126,118 @@ function SupplierDirectory({ suppliers, setSuppliers, contacts, setContacts }) {
 
   useEffect(()=>{stor.get("asmand:suppliers").then(d=>d&&setSuppliers(d));},[]);
   const persist = (data) => { setSuppliers(data); };
+
+  const openEmailModal = (sup, type) => {
+    setEmailModal({
+      supplier: sup, type,
+      step: "brief",
+      email: sup.email || "",
+      subject: "", body: "", loading: false,
+      rfqProducts: (sup.keyProducts||[]).join(", "),
+      rfqQuantity: "", rfqDeadline: "", rfqSpecs: "",
+      rfqEndUser: "Egyptian Ministry of Defence",
+      rfqUrgency: "standard",
+      customPrompt: "",
+    });
+  };
+
+  const generateEmail = async (modal) => {
+    const sup  = modal.supplier;
+    const type = modal.type;
+    const co   = settings?.companyName     || "Ashmand";
+    const coFull = settings?.companyFullName || "Ashmand for Defence & Security";
+    setEmailModal(p=>({...p, loading:true, step:"result"}));
+
+    const extra = modal.customPrompt
+      ? `
+SPECIFIC INSTRUCTIONS FROM PROCUREMENT MANAGER:
+${modal.customPrompt}
+`
+      : "";
+
+    const rfqBlock = type==="rfq" ? `
+RFQ REQUIREMENTS:
+- Items to quote: ${modal.rfqProducts || (sup.keyProducts||[]).join(", ") || sup.category || "as per your catalogue"}
+- Quantity: ${modal.rfqQuantity || "TBD — to be confirmed after initial quote"}
+- Technical standards required: ${modal.rfqSpecs || "To meet Egyptian MOD acceptance standards"}
+- End user: ${modal.rfqEndUser || "Egyptian Ministry of Defence"}
+- Delivery destination: Cairo, Egypt
+- Quote deadline: ${modal.rfqDeadline || "within 10 business days"}
+- Urgency level: ${modal.rfqUrgency==="urgent"?"URGENT — tender deadline in 2 weeks":modal.rfqUrgency==="asap"?"As soon as possible":"Standard"}
+` : "";
+
+    const introPrompt = `You are writing a professional business introduction email on behalf of ${coFull}, an Egyptian defence and security distributor, to ${sup.name} (${sup.country||"international supplier"}).
+
+ABOUT ${co.toUpperCase()}:
+- Egyptian defence & security distributor based in Cairo
+- Direct procurement relationships with Egyptian MOD, Army, Navy, Air Force, Air Defence, and Police
+- Active participant in Egyptian defence tenders
+- Seeking to expand international supplier partnerships
+${extra}
+ABOUT THE RECIPIENT:
+- Company: ${sup.name}, ${sup.country||""}
+- Their products: ${(sup.keyProducts||[]).join(", ")||sup.category||"defence equipment"}
+- Export risk: ${sup.exportRisk||"standard"}
+
+WRITE a sharp, confident 3-paragraph introduction email:
+Para 1 — Open with a SPECIFIC, compelling hook about why we are reaching out to THEM specifically (reference their products/market)
+Para 2 — Establish ${co}'s credibility: our Egyptian MOD relationships, active tenders, and market access
+Para 3 — Clear call to action: propose a call, request their catalogue, or suggest a meeting at a defence event
+
+DO NOT be generic. DO NOT use filler phrases like "I hope this email finds you well".
+Tone: Confident, direct, business-like. We are a serious buyer with real MOD access.
+
+Return ONLY this JSON (no other text):
+{"subject": "compelling subject line max 10 words", "body": "Dear [Name],\n\n[paragraph 1]\n\n[paragraph 2]\n\n[paragraph 3]\n\nBest regards,\n[Your Name]\nBusiness Development\n${coFull}\nCairo, Egypt | Tel: +20-XXXXXXXXX"}`;
+
+    const rfqPrompt = `You are drafting a formal RFQ (Request for Quotation) email from ${coFull} (Egyptian defence distributor) to ${sup.name} (${sup.country||"international supplier"}).
+${rfqBlock}${extra}
+ABOUT THE SUPPLIER:
+- ${sup.name}, ${sup.country||""}
+- Products: ${(sup.keyProducts||[]).join(", ")||sup.category||"defence equipment"}
+- Export risk: ${sup.exportRisk||"standard"}
+
+STRUCTURE THE EMAIL AS FOLLOWS:
+
+1. ONE sentence intro: who we are and why we are writing
+2. Formal RFQ section — use a clear numbered or bulleted list for EACH item we need quoted, with:
+   • Product name + any model/spec reference
+   • Quantity requested
+   • Required technical standard (NIJ, MIL-SPEC, STANAG, ISO etc)
+   • Requested delivery to Cairo, Egypt
+3. Ask for the following in their quotation response:
+   • Unit price in USD or EUR (EXW, FOB, and CIF Cairo)
+   • Minimum Order Quantity (MOQ)
+   • Lead time from order confirmation
+   • Payment terms offered
+   • Validity period of the quote
+4. Compliance section — ask specifically:
+   • Export licence status for Egypt (ITAR, EAR, EU Dual-Use)
+   • Any existing Egyptian MOD or Armed Forces approvals/qualifications
+   • End-user certificate requirements
+5. Close with our response deadline and contact details
+
+Tone: Formal procurement document. Precise, no fluff. Every sentence must serve a purpose.
+
+Return ONLY this JSON (no other text):
+{"subject": "RFQ — ${(sup.keyProducts||[]).slice(0,2).join(" / ")||sup.category||"Defence Equipment"} — ${coFull}", "body": "Dear [Name],\n\n[full structured email]\n\nYours faithfully,\n[Your Name]\nProcurement Department\n${coFull}\nCairo, Egypt"}`;
+
+    try {
+      const res = await fetch("https://api.anthropic.com/v1/messages",{
+        method:"POST",
+        headers:{"Content-Type":"application/json","x-api-key":process.env.REACT_APP_ANTHROPIC_API_KEY,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
+        body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:1600,messages:[{role:"user",content:type==="rfq"?rfqPrompt:introPrompt}]})
+      });
+      const data = await res.json();
+      if(data.error) throw new Error(data.error.message);
+      const raw   = (data.content||[]).map(b=>b.text||"").join("");
+      const start = raw.indexOf("{"), end = raw.lastIndexOf("}");
+      const parsed = JSON.parse(raw.slice(start, end+1));
+      setEmailModal(p=>({...p, loading:false, subject:parsed.subject||"", body:parsed.body||""}));
+    } catch(e) {
+      setEmailModal(p=>({...p, loading:false, body:"Error: "+e.message}));
+    }
+  };
   const f = (k,v) => setForm(p=>({...p,[k]:v}));
 
   const openNew  = () => { setForm({name:"",country:"",category:"",exportRisk:"",pricePosition:"",egyptRelationship:"",certifications:[],keyProducts:[],email:"",website:"",linkedIn:"",phone:"",contactPerson:"",notes:"",rating:""}); setEditId(null); setShowForm(true); };
@@ -2038,7 +2255,7 @@ function SupplierDirectory({ suppliers, setSuppliers, contacts, setContacts }) {
   const remove = (id) => { if(window.confirm("Delete supplier?")) persist(suppliers.filter(s=>s.id!==id)); };
 
   const countries = ["All",...[...new Set(suppliers.map(s=>s.country).filter(Boolean))].sort()];
-  const cats = ["All","Weapons & Ammunition","Electronics & Communications","PPE","Vehicles & Logistics","Surveillance","C2 Systems","MRO","Training","Other"];
+  const cats = ["All",...(categories||getCategories())];
 
   const filtered = suppliers.filter(s=>{
     const ms = !search||[s.name,s.country,s.category,...(s.keyProducts||[])].some(v=>v?.toLowerCase().includes(search.toLowerCase()));
@@ -2198,15 +2415,29 @@ function SupplierDirectory({ suppliers, setSuppliers, contacts, setContacts }) {
               </div>
               <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:6}}>
                 {s.notes&&<div style={{fontSize:11,color:C.t2,fontStyle:"italic",fontFamily:"Inter,sans-serif",lineHeight:1.5,flex:1}}>{s.notes?.slice(0,100)}{s.notes?.length>100?"…":""}</div>}
-                <button onClick={syncToContact}
-                  style={{fontFamily:"'JetBrains Mono',monospace",fontSize:9,padding:"4px 10px",
-                    border:"1px solid "+(contactExists?C.accent:C.purple),
-                    color:contactExists?C.accent:C.purple,
-                    background:contactExists?"rgba(0,212,170,0.05)":"rgba(155,93,229,0.05)",
-                    borderRadius:3,cursor:contactExists?"default":"pointer",letterSpacing:1,
-                    whiteSpace:"nowrap"}}>
-                  {contactExists?"✓ SYNCED TO CONTACTS":"→ ADD TO CONTACTS"}
-                </button>
+                <div style={{display:"flex",gap:5,flexWrap:"wrap",alignItems:"center"}}>
+                  <button onClick={()=>openEmailModal(s,"intro")}
+                    style={{fontFamily:"'JetBrains Mono',monospace",fontSize:9,padding:"4px 10px",
+                      border:"1px solid rgba(0,180,216,0.4)",color:C.blue,
+                      background:"rgba(0,180,216,0.06)",borderRadius:3,cursor:"pointer",letterSpacing:1,whiteSpace:"nowrap"}}>
+                    ✉ INTRO EMAIL
+                  </button>
+                  <button onClick={()=>openEmailModal(s,"rfq")}
+                    style={{fontFamily:"'JetBrains Mono',monospace",fontSize:9,padding:"4px 10px",
+                      border:"1px solid rgba(232,160,32,0.4)",color:C.gold,
+                      background:"rgba(232,160,32,0.06)",borderRadius:3,cursor:"pointer",letterSpacing:1,whiteSpace:"nowrap"}}>
+                    📋 REQUEST RFQ
+                  </button>
+                  <button onClick={syncToContact}
+                    style={{fontFamily:"'JetBrains Mono',monospace",fontSize:9,padding:"4px 10px",
+                      border:"1px solid "+(contactExists?C.accent:C.purple),
+                      color:contactExists?C.accent:C.purple,
+                      background:contactExists?"rgba(0,212,170,0.05)":"rgba(155,93,229,0.05)",
+                      borderRadius:3,cursor:contactExists?"default":"pointer",letterSpacing:1,
+                      whiteSpace:"nowrap"}}>
+                    {contactExists?"✓ SYNCED TO CONTACTS":"→ ADD TO CONTACTS"}
+                  </button>
+                </div>
               </div>
               {s.addedFrom&&<div style={{fontFamily:"'JetBrains Mono',monospace",fontSize:9,color:C.t3,marginTop:6}}>Source: {s.addedFrom}</div>}
             </div>
@@ -2223,7 +2454,7 @@ function SupplierDirectory({ suppliers, setSuppliers, contacts, setContacts }) {
             <Field label="Category">
               <Select value={form.category} onChange={e=>f("category",e.target.value)}>
                 <option value="">Select…</option>
-                {["Weapons & Ammunition","Electronics & Communications","PPE","Vehicles & Logistics","Surveillance","C2 Systems","MRO","Training","Other"].map(c=><option key={c}>{c}</option>)}
+                {(categories||getCategories()).map(c=><option key={c}>{c}</option>)}
               </Select>
             </Field>
             <Field label="Export Risk">
@@ -2280,7 +2511,7 @@ function SupplierDirectory({ suppliers, setSuppliers, contacts, setContacts }) {
 // ═══════════════════════════════════════════════════
 // MODULE: COMPETITOR INTELLIGENCE
 // ═══════════════════════════════════════════════════
-function CompetitorIntel({ tenders, competitors, setCompetitors }) {
+function CompetitorIntel({ tenders, competitors, setCompetitors, categories }) {
   const [activeTab, setActiveTab]   = useState("overview");
   const [showAddBid, setShowAddBid] = useState(false);
   const [showAddComp, setShowAddComp] = useState(false);
@@ -2825,7 +3056,7 @@ Return ONLY valid JSON.`;
             <Field label="Category">
               <Select value={bidForm.category} onChange={e=>bf("category",e.target.value)}>
                 <option value="">Select…</option>
-                {["Weapons & Ammunition","Electronics & Communications","PPE","Vehicles & Logistics","Surveillance","C2 Systems","MRO","Training","Other"].map(c=><option key={c}>{c}</option>)}
+                {(categories||getCategories()).map(c=><option key={c}>{c}</option>)}
               </Select>
             </Field>
             <Field label="Date"><Input type="date" value={bidForm.date} onChange={e=>bf("date",e.target.value)}/></Field>
@@ -2880,6 +3111,155 @@ Return ONLY valid JSON.`;
             <Btn onClick={saveComp}>{editCompId?"SAVE":"ADD COMPETITOR"}</Btn>
             <Btn variant="sec" onClick={()=>setShowAddComp(false)}>Cancel</Btn>
           </div>
+        </Modal>
+      )}
+
+      {/* EMAIL GENERATOR MODAL */}
+      {emailModal&&(
+        <Modal title={emailModal.type==="intro"?"✉ Introduction Email":"📋 Request for Quotation (RFQ)"} onClose={()=>setEmailModal(null)}>
+
+          {/* Header — supplier name + type tabs */}
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:16,flexWrap:"wrap",gap:8}}>
+            <div style={{display:"flex",alignItems:"center",gap:8}}>
+              <span style={{fontFamily:"Inter,sans-serif",fontSize:14,color:C.tb,fontWeight:800}}>{emailModal.supplier?.name}</span>
+              {emailModal.supplier?.country&&<Badge label={emailModal.supplier.country} color={C.t2}/>}
+            </div>
+            <div style={{display:"flex",gap:4}}>
+              {["intro","rfq"].map(t=>(
+                <button key={t} onClick={()=>setEmailModal(p=>({...p,type:t,step:"brief",subject:"",body:""}))}
+                  style={{padding:"5px 14px",borderRadius:3,cursor:"pointer",
+                    fontFamily:"JetBrains Mono,monospace",fontSize:9,letterSpacing:1,
+                    border:"1px solid "+(emailModal.type===t?(t==="rfq"?C.gold:C.blue):C.b),
+                    background:emailModal.type===t?(t==="rfq"?"rgba(232,160,32,0.12)":"rgba(74,158,255,0.12)"):"transparent",
+                    color:emailModal.type===t?(t==="rfq"?C.gold:C.blue):C.t2}}>
+                  {t==="intro"?"✉ INTRO":"📋 RFQ"}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* STEP 1 — BRIEF FORM */}
+          {emailModal.step==="brief"&&(
+            <div>
+              <Field label="Recipient Email">
+                <Input value={emailModal.email} onChange={e=>setEmailModal(p=>({...p,email:e.target.value}))} placeholder="contact@supplier.com"/>
+              </Field>
+
+              {/* RFQ-specific fields */}
+              {emailModal.type==="rfq"&&(
+                <div style={{marginTop:14,padding:"14px",background:C.s2,border:"1px solid "+C.b,borderRadius:6}}>
+                  <div style={{fontFamily:"JetBrains Mono,monospace",fontSize:9,color:C.gold,letterSpacing:2,marginBottom:12}}>RFQ DETAILS</div>
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+                    <Field label="Products / Items to Quote *">
+                      <Input value={emailModal.rfqProducts}
+                        onChange={e=>setEmailModal(p=>({...p,rfqProducts:e.target.value}))}
+                        placeholder="e.g. Body armour Level IV, ballistic helmets"/>
+                    </Field>
+                    <Field label="Quantity">
+                      <Input value={emailModal.rfqQuantity}
+                        onChange={e=>setEmailModal(p=>({...p,rfqQuantity:e.target.value}))}
+                        placeholder="e.g. 500 units, TBD"/>
+                    </Field>
+                    <Field label="Technical Specs / Standards">
+                      <Input value={emailModal.rfqSpecs}
+                        onChange={e=>setEmailModal(p=>({...p,rfqSpecs:e.target.value}))}
+                        placeholder="e.g. NIJ Level IV, NATO STANAG 4569"/>
+                    </Field>
+                    <Field label="End User">
+                      <Input value={emailModal.rfqEndUser}
+                        onChange={e=>setEmailModal(p=>({...p,rfqEndUser:e.target.value}))}
+                        placeholder="e.g. Egyptian Army, MOD"/>
+                    </Field>
+                    <Field label="Quote Required By">
+                      <Input type="date" value={emailModal.rfqDeadline}
+                        onChange={e=>setEmailModal(p=>({...p,rfqDeadline:e.target.value}))}/>
+                    </Field>
+                    <Field label="Urgency">
+                      <Select value={emailModal.rfqUrgency} onChange={e=>setEmailModal(p=>({...p,rfqUrgency:e.target.value}))}>
+                        <option value="standard">Standard — 10 business days</option>
+                        <option value="asap">ASAP</option>
+                        <option value="urgent">URGENT — 2 weeks</option>
+                      </Select>
+                    </Field>
+                  </div>
+                </div>
+              )}
+
+              {/* Custom instructions */}
+              <div style={{marginTop:14}}>
+                <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:6}}>
+                  <div style={{fontFamily:"JetBrains Mono,monospace",fontSize:9,color:C.purple,letterSpacing:2}}>YOUR INSTRUCTIONS TO AI</div>
+                  <span style={{fontFamily:"Inter,sans-serif",fontSize:10,color:C.t2}}>(optional — but the more you add, the better the email)</span>
+                </div>
+                <TA
+                  value={emailModal.customPrompt}
+                  onChange={e=>setEmailModal(p=>({...p,customPrompt:e.target.value}))}
+                  rows={4}
+                  placeholder={emailModal.type==="rfq"
+                    ? "Tell AI anything specific:
+• We need DDP pricing to Cairo
+• Ask if they have existing MOD approvals
+• Mention tender deadline is in 3 weeks
+• Ask for lead time and payment terms"
+                    : "Tell AI anything specific:
+• Mention our Air Force connections
+• We attended EDEX 2023
+• Focus on their night vision product line
+• Request a product demo in Cairo"}
+                  style={{fontFamily:"Inter,sans-serif",fontSize:12,lineHeight:1.6}}
+                />
+              </div>
+
+              <Btn onClick={()=>generateEmail(emailModal)}
+                style={{marginTop:14,width:"100%",padding:"13px",fontSize:13,letterSpacing:1,
+                  background:emailModal.type==="rfq"
+                    ?"linear-gradient(135deg,rgba(232,160,32,0.2),rgba(232,160,32,0.08))"
+                    :"linear-gradient(135deg,rgba(74,158,255,0.2),rgba(74,158,255,0.08))",
+                  border:"1px solid "+(emailModal.type==="rfq"?C.gold:C.blue),
+                  color:emailModal.type==="rfq"?C.gold:C.blue}}>
+                ⚡ GENERATE {emailModal.type==="rfq"?"RFQ EMAIL":"INTRODUCTION EMAIL"}
+              </Btn>
+            </div>
+          )}
+
+          {/* STEP 2 — RESULT */}
+          {emailModal.step==="result"&&(
+            <div>
+              {emailModal.loading?(
+                <div style={{textAlign:"center",padding:"52px 0"}}>
+                  <div style={{fontSize:34,marginBottom:12,animation:"spin 1.5s linear infinite",display:"inline-block"}}>⚙️</div>
+                  <div style={{fontFamily:"JetBrains Mono,monospace",fontSize:11,color:C.t2,letterSpacing:2}}>
+                    {emailModal.type==="rfq"?"DRAFTING RFQ…":"DRAFTING EMAIL…"}
+                  </div>
+                  <div style={{fontFamily:"Inter,sans-serif",fontSize:12,color:C.t2,marginTop:6}}>Writing a tailored email for {emailModal.supplier?.name}</div>
+                </div>
+              ):(
+                <div>
+                  <Field label="To"><Input value={emailModal.email} onChange={e=>setEmailModal(p=>({...p,email:e.target.value}))}/></Field>
+                  <Field label="Subject" style={{marginTop:10}}><Input value={emailModal.subject} onChange={e=>setEmailModal(p=>({...p,subject:e.target.value}))}/></Field>
+                  <Field label="Body" style={{marginTop:10}}>
+                    <TA value={emailModal.body} onChange={e=>setEmailModal(p=>({...p,body:e.target.value}))}
+                      rows={16} style={{fontFamily:"Inter,sans-serif",fontSize:12,lineHeight:1.8}}/>
+                  </Field>
+                  <div style={{display:"flex",gap:8,marginTop:14,flexWrap:"wrap"}}>
+                    <Btn onClick={()=>window.open(`mailto:${emailModal.email}?subject=${encodeURIComponent(emailModal.subject)}&body=${encodeURIComponent(emailModal.body)}`)}
+                      style={{fontSize:11,background:"linear-gradient(135deg,rgba(0,212,170,0.15),rgba(0,212,170,0.06))",border:"1px solid "+C.accent,color:C.accent}}>
+                      📨 Open in Mail App
+                    </Btn>
+                    <Btn variant="sec" onClick={()=>navigator.clipboard.writeText(`To: ${emailModal.email}
+Subject: ${emailModal.subject}
+
+${emailModal.body}`).then(()=>{setSyncMsg("✓ Copied");setTimeout(()=>setSyncMsg(""),3000);})} style={{fontSize:11}}>📋 Copy</Btn>
+                    <Btn variant="sec" onClick={()=>generateEmail(emailModal)} style={{fontSize:11}}>🔄 Regenerate</Btn>
+                    <Btn variant="sec" onClick={()=>setEmailModal(p=>({...p,step:"brief"}))} style={{fontSize:11}}>← Edit Brief</Btn>
+                  </div>
+                  <div style={{marginTop:10,padding:"8px 12px",background:C.s2,borderRadius:4,fontFamily:"JetBrains Mono,monospace",fontSize:9,color:C.t2}}>
+                    💡 Edit the subject or body before sending. "Open in Mail App" launches Outlook/Gmail pre-filled.
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </Modal>
       )}
     </div>
@@ -3472,7 +3852,138 @@ function GlobalSearch({ tenders, suppliers, contacts, bids, onNavigate, onClose 
 // ═══════════════════════════════════════════════════
 // MODULE: SETTINGS
 // ═══════════════════════════════════════════════════
-function Settings({ settings, setSettings }) {
+// ── CATEGORY MANAGER COMPONENT ──
+function CategoryManager({ categories, setCategories }) {
+  const [cats, setCats]       = useState(categories || getCategories());
+  const [input, setInput]     = useState("");
+  const [editIdx, setEditIdx] = useState(null);
+  const [editVal, setEditVal] = useState("");
+  const [msg, setMsg]         = useState("");
+
+  // Keep local state in sync if parent categories change
+  useEffect(() => { setCats(categories || getCategories()); }, [categories]);
+
+  const flash = (m) => { setMsg(m); setTimeout(()=>setMsg(""),3000); };
+
+  const persist = (updated) => {
+    setCats(updated);
+    if(setCategories) setCategories(updated); // propagate to App state → all modules
+    else localStorage.setItem(CATEGORIES_KEY, JSON.stringify(updated));
+    flash("✓ Categories saved — all dropdowns updated instantly");
+  };
+
+  const add = () => {
+    const trimmed = input.trim();
+    if(!trimmed) return;
+    if(cats.some(c=>c.toLowerCase()===trimmed.toLowerCase())) { flash("⚠ That category already exists"); return; }
+    persist([...cats, trimmed]);
+    setInput("");
+  };
+
+  const remove = (i) => {
+    if(!window.confirm(`Remove "${cats[i]}"? This won't delete existing records with this category.`)) return;
+    persist(cats.filter((_,j)=>j!==i));
+  };
+
+  const startEdit = (i) => { setEditIdx(i); setEditVal(cats[i]); };
+
+  const saveEdit = () => {
+    const trimmed = editVal.trim();
+    if(!trimmed) { setEditIdx(null); return; }
+    if(cats.some((c,i)=>i!==editIdx&&c.toLowerCase()===trimmed.toLowerCase())) { flash("⚠ That category name already exists"); return; }
+    const updated = cats.map((c,i)=>i===editIdx?trimmed:c);
+    persist(updated);
+    setEditIdx(null);
+  };
+
+  const moveUp   = (i) => { if(i===0) return; const a=[...cats]; [a[i-1],a[i]]=[a[i],a[i-1]]; persist(a); };
+  const moveDown = (i) => { if(i===cats.length-1) return; const a=[...cats]; [a[i],a[i+1]]=[a[i+1],a[i]]; persist(a); };
+  const reset    = () => { if(window.confirm("Reset to default categories?")) persist([...DEFAULT_CATS]); };
+
+  return (
+    <div style={{background:C.s1,border:"1px solid "+C.b,borderRadius:8,padding:"20px",marginBottom:16}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+        <div style={{fontFamily:"JetBrains Mono,monospace",fontSize:10,color:C.gold,letterSpacing:3}}>SUPPLY CATEGORIES</div>
+        <button onClick={reset} style={{padding:"4px 10px",borderRadius:3,border:"1px solid "+C.b,
+          background:C.s2,color:C.t2,cursor:"pointer",fontFamily:"JetBrains Mono,monospace",fontSize:9}}>
+          Reset Defaults
+        </button>
+      </div>
+
+      <p style={{fontFamily:"Inter,sans-serif",fontSize:12,color:C.t2,marginBottom:16,lineHeight:1.6}}>
+        These categories appear in all supplier, tender, and financial dropdowns across the platform. Changes apply immediately everywhere.
+      </p>
+
+      {/* Category list */}
+      <div style={{marginBottom:14}}>
+        {cats.map((cat,i)=>(
+          <div key={i} style={{display:"flex",alignItems:"center",gap:8,padding:"8px 10px",
+            background:C.s2,border:"1px solid "+C.b,borderRadius:5,marginBottom:6}}>
+            {/* Order controls */}
+            <div style={{display:"flex",flexDirection:"column",gap:1,flexShrink:0}}>
+              <button onClick={()=>moveUp(i)} style={{padding:"1px 5px",background:"transparent",border:"none",
+                color:i===0?C.t3:C.t2,cursor:i===0?"default":"pointer",fontSize:10,lineHeight:1}}>▲</button>
+              <button onClick={()=>moveDown(i)} style={{padding:"1px 5px",background:"transparent",border:"none",
+                color:i===cats.length-1?C.t3:C.t2,cursor:i===cats.length-1?"default":"pointer",fontSize:10,lineHeight:1}}>▼</button>
+            </div>
+            <span style={{fontFamily:"JetBrains Mono,monospace",fontSize:10,color:C.t3,width:22,flexShrink:0}}>{i+1}.</span>
+            {editIdx===i ? (
+              <input value={editVal} onChange={e=>setEditVal(e.target.value)}
+                onKeyDown={e=>{if(e.key==="Enter")saveEdit();if(e.key==="Escape")setEditIdx(null);}}
+                autoFocus
+                style={{flex:1,background:C.s1,border:"1px solid "+C.accent,borderRadius:3,
+                  padding:"4px 8px",color:C.tb,fontFamily:"Inter,sans-serif",fontSize:13,outline:"none"}}/>
+            ) : (
+              <span style={{flex:1,fontFamily:"Inter,sans-serif",fontSize:13,color:C.tb}}>{cat}</span>
+            )}
+            <div style={{display:"flex",gap:5,flexShrink:0}}>
+              {editIdx===i ? (
+                <>
+                  <button onClick={saveEdit} style={{padding:"3px 10px",borderRadius:3,border:"1px solid "+C.accent,
+                    background:"rgba(0,212,170,0.1)",color:C.accent,cursor:"pointer",
+                    fontFamily:"JetBrains Mono,monospace",fontSize:9}}>Save</button>
+                  <button onClick={()=>setEditIdx(null)} style={{padding:"3px 10px",borderRadius:3,border:"1px solid "+C.b,
+                    background:"transparent",color:C.t2,cursor:"pointer",
+                    fontFamily:"JetBrains Mono,monospace",fontSize:9}}>Cancel</button>
+                </>
+              ) : (
+                <>
+                  <button onClick={()=>startEdit(i)} style={{padding:"3px 10px",borderRadius:3,border:"1px solid "+C.b,
+                    background:"transparent",color:C.t2,cursor:"pointer",
+                    fontFamily:"JetBrains Mono,monospace",fontSize:9}}>✏ Edit</button>
+                  <button onClick={()=>remove(i)} style={{padding:"3px 10px",borderRadius:3,border:"1px solid rgba(230,57,70,0.3)",
+                    background:"rgba(230,57,70,0.08)",color:C.red,cursor:"pointer",
+                    fontFamily:"JetBrains Mono,monospace",fontSize:9}}>🗑</button>
+                </>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Add new */}
+      <div style={{display:"flex",gap:8}}>
+        <input value={input} onChange={e=>setInput(e.target.value)}
+          onKeyDown={e=>e.key==="Enter"&&add()}
+          placeholder="New category name… (press Enter)"
+          style={{flex:1,background:C.s2,border:"1px solid "+C.b,borderRadius:4,
+            padding:"8px 12px",color:C.tb,fontFamily:"Inter,sans-serif",fontSize:13,outline:"none"}}/>
+        <Btn onClick={add} style={{fontSize:11,padding:"8px 18px"}}>+ Add</Btn>
+      </div>
+
+      {msg&&(
+        <div style={{marginTop:10,padding:"8px 12px",background:msg.startsWith("⚠")?"rgba(230,57,70,0.08)":"rgba(0,212,170,0.08)",
+          border:"1px solid "+(msg.startsWith("⚠")?C.red:C.accent),borderRadius:4,
+          fontFamily:"JetBrains Mono,monospace",fontSize:11,
+          color:msg.startsWith("⚠")?C.red:C.accent}}>
+          {msg}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Settings({ settings, setSettings, categories, setCategories }) {
   const defaults = {
     companyName:"Ashmand",
     companyFullName:"Ashmand for Defence & Security",
@@ -3582,6 +4093,8 @@ function Settings({ settings, setSettings }) {
           </Field>
         </div>
       </Section>
+
+      <CategoryManager categories={categories} setCategories={setCategories}/>
 
       {saved&&(
         <div style={{position:"fixed",bottom:32,right:32,zIndex:9999,padding:"16px 24px",
@@ -4775,6 +5288,12 @@ export default function App() {
   const [syncLog,setSyncLog]     = useState([]);
   const [showSearch,setShowSearch] = useState(false);
   const [settings,setSettingsRaw]  = useState({});
+  const [categories,setCategoriesRaw] = useState(getCategories());
+
+  const setCategories = (cats) => {
+    setCategoriesRaw(cats);
+    localStorage.setItem(CATEGORIES_KEY, JSON.stringify(cats));
+  };
   const syncTimer                = useRef(null);
 
   // ── Init auth on mount ──
@@ -5143,12 +5662,12 @@ export default function App() {
 
         <div key={module} style={{animation:"fadeUp 0.25s ease both"}}>
           {module==="home"    &&<CommandCentre tenders={tenders} suppliers={suppliers} contacts={contacts} bids={bids} settings={settings}/>}
-          {module==="intel"   &&<TenderIntelligence suppliers={suppliers} onSaveSuppliers={setSuppliers} settings={settings}/>}
+          {module==="intel"   &&<TenderIntelligence suppliers={suppliers} onSaveSuppliers={setSuppliers} settings={settings} categories={categories}/>}
           {module==="market"  &&<MarketIntelligence tenders={tenders} suppliers={suppliers} bids={bids} contacts={contacts} settings={settings}/>}
-          {module==="compete" &&<CompetitorIntel tenders={tenders} competitors={competitors} setCompetitors={setCompetitorsRaw}/>}
-          {module==="settings"&&<Settings settings={settings} setSettings={setSettingsRaw}/>}
-          {module==="tenders" &&<TendersFile contacts={contacts} setTenders={setTenders} tenders={tenders} settings={settings}/>}
-          {module==="suppliers"&&<SupplierDirectory suppliers={suppliers} setSuppliers={setSuppliers} contacts={contacts} setContacts={setContacts} settings={settings}/>}
+          {module==="compete" &&<CompetitorIntel tenders={tenders} competitors={competitors} setCompetitors={setCompetitorsRaw} categories={categories}/>}
+          {module==="settings"&&<Settings settings={settings} setSettings={setSettingsRaw} categories={categories} setCategories={setCategories}/>}
+          {module==="tenders" &&<TendersFile contacts={contacts} setTenders={setTenders} tenders={tenders} settings={settings} categories={categories}/>}
+          {module==="suppliers"&&<SupplierDirectory suppliers={suppliers} setSuppliers={setSuppliers} contacts={contacts} setContacts={setContacts} settings={settings} categories={categories}/>}
           {module==="contacts"&&<ContactsCRM contacts={contacts} setContacts={setContacts} suppliers={suppliers}/>}
           {module==="finance" &&<Financials bids={bids} setBids={setBids} tenders={tenders} settings={settings}/>}
         </div>
